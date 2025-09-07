@@ -10,13 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 import random
 from datetime import datetime
 
-# 这行代码会自动选择GPU（如果可用），否则退回到CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
-
-# 2. THE DATASET CLASS
-# ---
 # Its job: Load an audio file, convert it to a spectrogram, and return it with its numerical label.
 def load_data(data_path):
     audio_info = []
@@ -51,7 +45,7 @@ def load_data(data_path):
 
 
 def split_data(audio_info):
-    random.seed(42)
+    random.seed(41)
     random.shuffle(audio_info)
     print(f"audio info length: {len(audio_info)}")
     train_size = int(len(audio_info) * 0.7)
@@ -131,8 +125,6 @@ def collate_fn_spectrogram(batch):
     return spectrograms_batch, labels_batch
 
 
-# 3. THE MODEL CLASS
-# ---
 # Its job: Define the Transformer architecture.
 class AudioTransformer(nn.Module):
     def __init__(self, num_input_features=128, num_classes=35, dropout=0.1):
@@ -379,17 +371,20 @@ class Trainer:
         print("Test complete!")
 
 
-# 4. THE TRAINING SCRIPT
-# ---
-# This block runs when you execute the python file.
-if __name__ == "__main__":
+def main():
+    # 这行代码会自动选择GPU（如果可用），否则退回到CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     # Instantiate the Dataset and DataLoader
     print("start loading dataset")
     audio_info, label_map, label_map_reverse = load_data(
         "SpeechCommands/speech_commands_v0.02"
     )
+    debug = True
     # comment out this line if you want to train on a smaller dataset for a faster debugging purpose
-    # audio_info = audio_info[:10000]
+    if debug:
+        audio_info = audio_info[:10000]
 
     audio_info_training, audio_info_validation, audio_info_test = split_data(audio_info)
     train_dataset = SpeechCommandsDataset(
@@ -432,7 +427,7 @@ if __name__ == "__main__":
     print(f"Experiment timestamp: {timestamp}")
 
     # --- 2. 创建并启动 Trainer ---
-    total_epochs = 2
+    total_epochs = 2 if debug else 10
     trainer = Trainer(
         model,
         train_loader,
@@ -454,3 +449,7 @@ if __name__ == "__main__":
 
     print("Training complete!")
     print("To view TensorBoard, run: tensorboard --logdir=runs")
+
+
+if __name__ == "__main__":
+    main()
