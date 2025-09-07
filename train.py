@@ -196,6 +196,189 @@ def validate_model(data_loader, model, loss_fn, device):
     return avg_loss, accuracy
 
 
+class Trainer:
+    def __init__(
+        self,
+        model,
+        train_loader,
+        val_loader,
+        test_loader,
+        optimizer,
+        loss_fn,
+        scheduler,
+        device,
+        total_epochs,
+        writer=None,
+    ):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.test_loader = test_loader
+        self.optimizer = optimizer
+        self.loss_fn = loss_fn
+        self.scheduler = scheduler
+        self.device = device
+        self.total_epochs = total_epochs
+        self.best_val_accuracy = 0.0
+        self.step = 0
+        self.timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.total_steps = len(self.train_loader) * self.total_epochs
+        if writer is None:
+            self.writer = SummaryWriter(f"runs/exp-{self.timestamp}")
+        else:
+            self.writer = writer
+
+    def _train_one_epoch(self, epoch):
+        self.model.train()  # 确保模型在训练模式
+        epoch_loss = 0.0
+        num_batches = 0
+
+        for batch_idx, (spectrograms, labels) in enumerate(self.train_loader):
+            spectrograms = spectrograms.to(self.device)
+            labels = labels.to(self.device)
+
+            # 1. PREDICT: Pass data through the model
+            predictions = self.model(spectrograms)
+
+            # 2. COMPARE: Calculate the error
+            loss = self.loss_fn(predictions, labels)
+
+            # 3. ADJUST: Update the model's weights
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            # Update tracking variables
+            epoch_loss += loss.item()
+            num_batches += 1
+            self.step += 1
+
+            # Log to TensorBoard every step
+            self.writer.add_scalar("Loss/Train", loss.item(), self.step)
+
+            # Print progress every 10 steps or at the end of each epoch
+            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(self.train_loader):
+                avg_loss = epoch_loss / num_batches
+                print(
+                    f"Epoch {epoch+1:2d}/{self.total_epochs} | Step {self.step:4d}/{self.total_steps} | "
+                    f"Batch {batch_idx+1:3d}/{len(self.train_loader)} | "
+                    f"Loss: {loss.item():.6f} | Avg Loss: {avg_loss:.6f}"
+                )
+
+        # Log epoch average loss to TensorBoard
+        avg_epoch_loss = epoch_loss / num_batches
+        self.writer.add_scalar("Loss/Epoch_Avg", avg_epoch_loss, epoch + 1)
+        # Print epoch summary
+        print(
+            f"Epoch {epoch+1:2d}/{self.total_epochs} completed | Avg Loss: {avg_epoch_loss:.6f}"
+        )
+        print("-" * 80)
+
+    def _validate_one_epoch(self, epoch, loader=None):
+        self.model.eval()  # 1. 切换到评估模式
+        val_loss = 0
+        correct = 0
+        total = 0
+
+        print("  Starting validation...")
+
+        with torch.no_grad():  # 2. 在此代码块内不计算梯度
+            for batch_idx, (spectrograms, labels) in enumerate(loader):
+                spectrograms = spectrograms.to(self.device)
+                labels = labels.to(self.device)
+
+                # 只进行预测和计算损失
+                predictions = self.model(spectrograms)
+                loss = self.loss_fn(predictions, labels)
+
+                val_loss += loss.item()
+
+                # 计算准确率
+                _, predicted_labels = torch.max(predictions.data, 1)
+                total += labels.size(0)
+                correct += (predicted_labels == labels).sum().item()
+
+                # 每10个batch打印一次验证进度
+                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
+                    current_accuracy = 100 * correct / total
+                    print(
+                        f"    Validation Batch {batch_idx+1:3d}/{len(loader)} | "
+                        f"Current Accuracy: {current_accuracy:.2f}%"
+                    )
+
+        avg_loss = val_loss / len(loader)
+        val_accuracy = 100 * correct / total
+
+        print(
+            f"  Validation completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+        )
+
+        if val_accuracy > self.best_val_accuracy:
+            self.best_val_accuracy = val_accuracy
+            print(
+                f"New best validation accuracy: {self.best_val_accuracy:.2f}%. Saving model..."
+            )
+            torch.save(
+                self.model.state_dict(), f"best_model_{self.timestamp}_epoch{epoch}.pth"
+            )
+        self.writer.add_scalar("Loss/Val", val_loss, epoch + 1)
+        self.writer.add_scalar("Accuracy/Val", val_accuracy, epoch + 1)
+
+    def train(self):
+        print("Starting training...")
+        for epoch in range(self.total_epochs):
+            self._train_one_epoch(epoch)
+            self._validate_one_epoch(epoch, self.val_loader)
+            if self.scheduler:
+                self.scheduler.step()
+            print("-" * 80)
+
+        self.writer.close()
+        print("Training complete!")
+
+    def test(self):
+        print("Starting test...")
+        self.model.eval()  # 1. 切换到评估模式
+        val_loss = 0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():  # 2. 在此代码块内不计算梯度
+            for batch_idx, (spectrograms, labels) in enumerate(self.test_loader):
+                spectrograms = spectrograms.to(self.device)
+                labels = labels.to(self.device)
+
+                # 只进行预测和计算损失
+                predictions = self.model(spectrograms)
+                loss = self.loss_fn(predictions, labels)
+
+                val_loss += loss.item()
+
+                # 计算准确率
+                _, predicted_labels = torch.max(predictions.data, 1)
+                total += labels.size(0)
+                correct += (predicted_labels == labels).sum().item()
+
+                # 每10个batch打印一次验证进度
+                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
+                    self.test_loader
+                ):
+                    current_accuracy = 100 * correct / total
+                    print(
+                        f"    Test Batch {batch_idx+1:3d}/{len(self.test_loader)} | "
+                        f"Current Accuracy: {current_accuracy:.2f}%"
+                    )
+
+        avg_loss = val_loss / len(self.test_loader)
+        val_accuracy = 100 * correct / total
+
+        print(
+            f"  Test completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+        )
+
+        print("Test complete!")
+
+
 # 4. THE TRAINING SCRIPT
 # ---
 # This block runs when you execute the python file.
@@ -205,31 +388,34 @@ if __name__ == "__main__":
     audio_info, label_map, label_map_reverse = load_data(
         "SpeechCommands/speech_commands_v0.02"
     )
+    # comment out this line if you want to train on a smaller dataset for a faster debugging purpose
+    # audio_info = audio_info[:10000]
+
     audio_info_training, audio_info_validation, audio_info_test = split_data(audio_info)
-    dataset_training = SpeechCommandsDataset(
+    train_dataset = SpeechCommandsDataset(
         audio_info_training, label_map, label_map_reverse
     )
-    dataset_validation = SpeechCommandsDataset(
+    val_dataset = SpeechCommandsDataset(
         audio_info_validation, label_map, label_map_reverse
     )
-    dataset_test = SpeechCommandsDataset(audio_info_test, label_map, label_map_reverse)
+    test_dataset = SpeechCommandsDataset(audio_info_test, label_map, label_map_reverse)
     print("dataset loaded")
 
     print("start init data loader")
-    data_loader_training = DataLoader(
-        dataset_training,
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=512,
         shuffle=True,
         collate_fn=collate_fn_spectrogram,
     )
-    data_loader_validation = DataLoader(
-        dataset_validation,
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=512,
         shuffle=True,
         collate_fn=collate_fn_spectrogram,
     )
-    data_loader_test = DataLoader(
-        dataset_test, batch_size=512, shuffle=True, collate_fn=collate_fn_spectrogram
+    test_loader = DataLoader(
+        test_dataset, batch_size=512, shuffle=True, collate_fn=collate_fn_spectrogram
     )
 
     print("data loader initialized")
@@ -245,84 +431,26 @@ if __name__ == "__main__":
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     print(f"Experiment timestamp: {timestamp}")
 
-    # Initialize TensorBoard writer with timestamp
-    writer = SummaryWriter(f"runs/vr-exp-{timestamp}")
-
-    # The Training Loop
-    print("Starting training...")
-    total_epochs = 20
-    total_steps = len(data_loader_training) * total_epochs  # Total steps for all epochs
-    step = 0
-
-    best_val_accuracy = 0.0
-    for epoch in range(total_epochs):  # An "epoch" is one full pass over the dataset
-        epoch_loss = 0.0
-        num_batches = 0
-
-        for batch_idx, (spectrograms, labels) in enumerate(data_loader_training):
-            spectrograms = spectrograms.to(device)
-            labels = labels.to(device)
-
-            # 1. PREDICT: Pass data through the model
-            predictions = model(spectrograms)
-
-            # 2. COMPARE: Calculate the error
-            loss = loss_fn(predictions, labels)
-
-            # 3. ADJUST: Update the model's weights
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            # Update tracking variables
-            epoch_loss += loss.item()
-            num_batches += 1
-            step += 1
-
-            # Log to TensorBoard every step
-            writer.add_scalar("Loss/Train", loss.item(), step)
-
-            # Print progress every 10 steps or at the end of each epoch
-            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
-                data_loader_training
-            ):
-                avg_loss = epoch_loss / num_batches
-                print(
-                    f"Epoch {epoch+1:2d}/{total_epochs} | Step {step:4d}/{total_steps} | "
-                    f"Batch {batch_idx+1:3d}/{len(data_loader_training)} | "
-                    f"Loss: {loss.item():.6f} | Avg Loss: {avg_loss:.6f}"
-                )
-
-        # Log epoch average loss to TensorBoard
-        avg_epoch_loss = epoch_loss / num_batches
-        writer.add_scalar("Loss/Epoch_Avg", avg_epoch_loss, epoch + 1)
-        # Print epoch summary
-        print(
-            f"Epoch {epoch+1:2d}/{total_epochs} completed | Avg Loss: {avg_epoch_loss:.6f}"
-        )
-        print("-" * 80)
-
-        # Validate the model
-        val_loss, val_accuracy = validate_model(
-            data_loader_validation, model, loss_fn, device
-        )
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
-            print(
-                f"New best validation accuracy: {best_val_accuracy:.2f}%. Saving model..."
-            )
-            torch.save(model.state_dict(), f"best_model_{timestamp}_epoch{epoch}.pth")
-        writer.add_scalar("Loss/Val", val_loss, epoch + 1)
-        writer.add_scalar("Accuracy/Val", val_accuracy, epoch + 1)
-        scheduler.step()
-
-    print("Running final test...")
-    test_loss, test_accuracy = validate_model(data_loader_test, model, loss_fn, device)
-    print(
-        f"Final Test Results | Test Loss: {test_loss:.6f} | Test Accuracy: {test_accuracy:.2f}%"
+    # --- 2. 创建并启动 Trainer ---
+    total_epochs = 2
+    trainer = Trainer(
+        model,
+        train_loader,
+        val_loader,
+        test_loader,
+        optimizer,
+        loss_fn,
+        scheduler,
+        device,
+        total_epochs,
     )
+    trainer.train()
+
+    # --- 3. (可选) 最终测试 ---
+    # test_loader = DataLoader(test_dataset, ...)
+    trainer.test()  # 你可以为 Trainer 添加一个 .test() 方法
 
     # Close TensorBoard writer
-    writer.close()
+
     print("Training complete!")
     print("To view TensorBoard, run: tensorboard --logdir=runs")
