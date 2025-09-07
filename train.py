@@ -200,6 +200,7 @@ class Trainer:
         scheduler,
         device,
         total_epochs,
+        exp_path=None,
         writer=None,
     ):
         self.model = model
@@ -215,8 +216,13 @@ class Trainer:
         self.step = 0
         self.timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.total_steps = len(self.train_loader) * self.total_epochs
+        if exp_path is None:
+            self.exp_path = f"runs/exp-{self.timestamp}"
+        else:
+            self.exp_path = exp_path
+        print(f"Experiment path: {self.exp_path}")
         if writer is None:
-            self.writer = SummaryWriter(f"runs/exp-{self.timestamp}")
+            self.writer = SummaryWriter(f"{self.exp_path}/logs")
         else:
             self.writer = writer
 
@@ -310,9 +316,9 @@ class Trainer:
             print(
                 f"New best validation accuracy: {self.best_val_accuracy:.2f}%. Saving model..."
             )
-            torch.save(
-                self.model.state_dict(), f"best_model_{self.timestamp}_epoch{epoch}.pth"
-            )
+            model_folder = f"{self.exp_path}/models"
+            os.makedirs(model_folder, exist_ok=True)
+            torch.save(self.model.state_dict(), f"{model_folder}/best-epoch{epoch}.pth")
         self.writer.add_scalar("Loss/Val", val_loss, epoch + 1)
         self.writer.add_scalar("Accuracy/Val", val_accuracy, epoch + 1)
 
