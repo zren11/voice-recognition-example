@@ -9,6 +9,8 @@ import json
 from torch.utils.tensorboard import SummaryWriter
 import random
 from datetime import datetime
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
 
 
 # Its job: Load an audio file, convert it to a spectrogram, and return it with its numerical label.
@@ -147,47 +149,6 @@ class AudioTransformer(nn.Module):
         return predictions
 
 
-def validate_model(data_loader, model, loss_fn, device):
-    model.eval()  # 1. 切换到评估模式
-    val_loss = 0
-    correct = 0
-    total = 0
-
-    print("  Starting validation...")
-
-    with torch.no_grad():  # 2. 在此代码块内不计算梯度
-        for batch_idx, (spectrograms, labels) in enumerate(data_loader):
-            spectrograms = spectrograms.to(device)
-            labels = labels.to(device)
-
-            # 只进行预测和计算损失
-            predictions = model(spectrograms)
-            loss = loss_fn(predictions, labels)
-
-            val_loss += loss.item()
-
-            # 计算准确率
-            _, predicted_labels = torch.max(predictions.data, 1)
-            total += labels.size(0)
-            correct += (predicted_labels == labels).sum().item()
-
-            # 每10个batch打印一次验证进度
-            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(data_loader):
-                current_accuracy = 100 * correct / total
-                print(
-                    f"    Validation Batch {batch_idx+1:3d}/{len(data_loader)} | "
-                    f"Current Accuracy: {current_accuracy:.2f}%"
-                )
-
-    avg_loss = val_loss / len(data_loader)
-    accuracy = 100 * correct / total
-
-    print(f"  Validation completed | Loss: {avg_loss:.6f} | Accuracy: {accuracy:.2f}%")
-
-    model.train()  # 验证结束后，别忘了切换回训练模式！
-    return avg_loss, accuracy
-
-
 class Trainer:
     def __init__(
         self,
@@ -201,7 +162,7 @@ class Trainer:
         device,
         total_epochs,
         exp_path=None,
-        writer=None,
+        rank=None,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -221,12 +182,17 @@ class Trainer:
         else:
             self.exp_path = exp_path
         print(f"Experiment path: {self.exp_path}")
-        if writer is None:
+
+        self.rank = rank
+        self.is_main_process = self.rank == 0
+
+        if self.is_main_process:
             self.writer = SummaryWriter(f"{self.exp_path}/logs")
         else:
-            self.writer = writer
+            self.writer = None
 
     def _train_one_epoch(self, epoch):
+        self.train_loader.sampler.set_epoch(epoch)
         self.model.train()  # 确保模型在训练模式
         epoch_loss = 0.0
         num_batches = 0
@@ -252,33 +218,43 @@ class Trainer:
             self.step += 1
 
             # Log to TensorBoard every step
-            self.writer.add_scalar("Loss/Train", loss.item(), self.step)
-
-            # Print progress every 10 steps or at the end of each epoch
-            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(self.train_loader):
-                avg_loss = epoch_loss / num_batches
-                print(
-                    f"Epoch {epoch+1:2d}/{self.total_epochs} | Step {self.step:4d}/{self.total_steps} | "
-                    f"Batch {batch_idx+1:3d}/{len(self.train_loader)} | "
-                    f"Loss: {loss.item():.6f} | Avg Loss: {avg_loss:.6f}"
-                )
+            if self.is_main_process:
+                self.writer.add_scalar("Loss/Train", loss.item(), self.step)
+                # Print progress every 10 steps or at the end of each epoch
+                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
+                    self.train_loader
+                ):
+                    avg_loss = epoch_loss / num_batches
+                    print(
+                        f"Epoch {epoch+1:2d}/{self.total_epochs} | Step {self.step:4d}/{self.total_steps} | "
+                        f"Batch {batch_idx+1:3d}/{len(self.train_loader)} | "
+                        f"Loss: {loss.item():.6f} | Avg Loss: {avg_loss:.6f}"
+                    )
 
         # Log epoch average loss to TensorBoard
         avg_epoch_loss = epoch_loss / num_batches
-        self.writer.add_scalar("Loss/Epoch_Avg", avg_epoch_loss, epoch + 1)
-        # Print epoch summary
-        print(
-            f"Epoch {epoch+1:2d}/{self.total_epochs} completed | Avg Loss: {avg_epoch_loss:.6f}"
-        )
-        print("-" * 80)
+        if self.is_main_process:
+            self.writer.add_scalar("Loss/Epoch_Avg", avg_epoch_loss, epoch + 1)
+            # Print epoch summary
+            print(
+                f"Epoch {epoch+1:2d}/{self.total_epochs} completed | Avg Loss: {avg_epoch_loss:.6f}"
+            )
+            print("-" * 80)
 
     def _validate_one_epoch(self, epoch, loader=None):
-        self.model.eval()  # 1. 切换到评估模式
-        val_loss = 0
-        correct = 0
-        total = 0
+        if hasattr(loader, "sampler") and isinstance(
+            loader.sampler, torch.utils.data.distributed.DistributedSampler
+        ):
+            loader.sampler.set_epoch(epoch)
 
-        print("  Starting validation...")
+        self.model.eval()  # 1. 切换到评估模式
+        # These are calculated locally on each process
+        local_val_loss = 0
+        local_correct = 0
+        local_total = 0
+
+        if self.is_main_process:
+            print("  Starting validation...")
 
         with torch.no_grad():  # 2. 在此代码块内不计算梯度
             for batch_idx, (spectrograms, labels) in enumerate(loader):
@@ -289,38 +265,71 @@ class Trainer:
                 predictions = self.model(spectrograms)
                 loss = self.loss_fn(predictions, labels)
 
-                val_loss += loss.item()
+                local_val_loss += loss.item()
 
                 # 计算准确率
                 _, predicted_labels = torch.max(predictions.data, 1)
-                total += labels.size(0)
-                correct += (predicted_labels == labels).sum().item()
+                local_total += labels.size(0)
+                local_correct += (predicted_labels == labels).sum().item()
 
                 # 每10个batch打印一次验证进度
-                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
-                    current_accuracy = 100 * correct / total
+                if self.is_main_process and (
+                    (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader)
+                ):
+                    current_accuracy = 100 * local_correct / local_total
                     print(
                         f"    Validation Batch {batch_idx+1:3d}/{len(loader)} | "
                         f"Current Accuracy: {current_accuracy:.2f}%"
                     )
-
-        avg_loss = val_loss / len(loader)
-        val_accuracy = 100 * correct / total
-
-        print(
-            f"  Validation completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
-        )
-
-        if val_accuracy > self.best_val_accuracy:
-            self.best_val_accuracy = val_accuracy
-            print(
-                f"New best validation accuracy: {self.best_val_accuracy:.2f}%. Saving model..."
+        # --- DDP Synchronization Step ---
+        if dist.is_initialized():
+            if self.is_main_process:
+                print("DDP is initialized")
+            # If we are in DDP, we need to aggregate results from all processes
+            metrics = torch.tensor([local_correct, local_total, local_val_loss]).to(
+                self.device
             )
-            model_folder = f"{self.exp_path}/models"
-            os.makedirs(model_folder, exist_ok=True)
-            torch.save(self.model.state_dict(), f"{model_folder}/best-epoch{epoch}.pth")
-        self.writer.add_scalar("Loss/Val", val_loss, epoch + 1)
-        self.writer.add_scalar("Accuracy/Val", val_accuracy, epoch + 1)
+            # Sum the values from all GPUs
+            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            # Get the total values
+            total_correct = metrics[0].item()
+            total_samples = metrics[1].item()
+            total_loss = metrics[2].item()
+        else:
+            if self.is_main_process:
+                print("DDP is not initialized")
+            # If not in DDP, the local values are the total values
+            total_correct = local_correct
+            total_samples = local_total
+            total_loss = local_val_loss
+
+        if self.is_main_process:
+            if dist.is_initialized():
+                # In DDP, the total number of batches is len(loader) * world_size
+                world_size = dist.get_world_size()
+                avg_loss = total_loss / (len(loader) * world_size)
+            else:
+                avg_loss = total_loss / len(loader)
+
+            val_accuracy = 100 * total_correct / total_samples
+
+            print(
+                f"  Validation completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+            )
+
+            if val_accuracy > self.best_val_accuracy:
+                self.best_val_accuracy = val_accuracy
+                print(
+                    f"New best validation accuracy: {self.best_val_accuracy:.2f}%. Saving model..."
+                )
+                model_folder = f"{self.exp_path}/models"
+                os.makedirs(model_folder, exist_ok=True)
+                torch.save(
+                    self.model.state_dict(), f"{model_folder}/best-epoch{epoch}.pth"
+                )
+
+                self.writer.add_scalar("Loss/Val", total_loss, epoch + 1)
+                self.writer.add_scalar("Accuracy/Val", val_accuracy, epoch + 1)
 
     def train(self):
         print("Starting training...")
@@ -331,8 +340,9 @@ class Trainer:
                 self.scheduler.step()
             print("-" * 80)
 
-        self.writer.close()
-        print("Training complete!")
+        if self.is_main_process:
+            self.writer.close()
+            print("Training complete!")
 
     def test(self):
         print("Starting test...")
@@ -377,9 +387,47 @@ class Trainer:
         print("Test complete!")
 
 
+def setup_ddp():
+    """初始化DDP进程组"""
+    # 这行是关键：为当前进程绑定唯一的GPU
+    if (
+        "LOCAL_RANK" not in os.environ
+        or "RANK" not in os.environ
+        or "WORLD_SIZE" not in os.environ
+    ):
+        print("LOCAL_RANK, RANK, and WORLD_SIZE is not set, will skip using DDP")
+        return torch.device("cuda") if torch.cuda.is_available() else "cpu", 0, 0
+    print(
+        f"LOCAL_RANK: {os.environ['LOCAL_RANK']}, RANK: {os.environ['RANK']}, WORLD_SIZE: {os.environ['WORLD_SIZE']}"
+    )
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+
+    if torch.cuda.is_available():
+        dist.init_process_group(backend="nccl")
+        device = torch.device("cuda", local_rank)
+
+    else:
+        device = torch.device("cpu")
+        dist.init_process_group(backend="gloo")
+
+    rank = torch.distributed.get_rank()
+    print(
+        f"Rank(dist.get_rank()): {rank}, Rank(os.environ['RANK']): {os.environ['RANK']}, Local Rank(os.environ['LOCAL_RANK']): {local_rank}"
+    )
+
+    return device, local_rank, rank
+
+
+def cleanup_ddp():
+    """销毁进程组"""
+    dist.destroy_process_group()
+
+
 def main():
     # 这行代码会自动选择GPU（如果可用），否则退回到CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device, local_rank, rank = setup_ddp()
+
     print(f"Using device: {device}")
 
     # Instantiate the Dataset and DataLoader
@@ -387,7 +435,7 @@ def main():
     audio_info, label_map, label_map_reverse = load_data(
         "SpeechCommands/speech_commands_v0.02"
     )
-    debug = True
+    debug = False
     # comment out this line if you want to train on a smaller dataset for a faster debugging purpose
     if debug:
         audio_info = audio_info[:10000]
@@ -396,6 +444,7 @@ def main():
     train_dataset = SpeechCommandsDataset(
         audio_info_training, label_map, label_map_reverse
     )
+
     val_dataset = SpeechCommandsDataset(
         audio_info_validation, label_map, label_map_reverse
     )
@@ -403,20 +452,30 @@ def main():
     print("dataset loaded")
 
     print("start init data loader")
+
+    train_sampler = DistributedSampler(train_dataset)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=512,
-        shuffle=True,
+        batch_size=128,
+        shuffle=False,
+        sampler=train_sampler,
         collate_fn=collate_fn_spectrogram,
     )
+    val_sampler = DistributedSampler(val_dataset)
     val_loader = DataLoader(
         val_dataset,
-        batch_size=512,
-        shuffle=True,
+        batch_size=128,
+        shuffle=False,
+        sampler=val_sampler,
         collate_fn=collate_fn_spectrogram,
     )
+    test_sampler = DistributedSampler(test_dataset)
     test_loader = DataLoader(
-        test_dataset, batch_size=512, shuffle=True, collate_fn=collate_fn_spectrogram
+        test_dataset,
+        batch_size=128,
+        shuffle=False,
+        sampler=test_sampler,
+        collate_fn=collate_fn_spectrogram,
     )
 
     print("data loader initialized")
@@ -426,14 +485,14 @@ def main():
 
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.9)
 
     # Generate timestamp for this experiment
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     print(f"Experiment timestamp: {timestamp}")
 
     # --- 2. 创建并启动 Trainer ---
-    total_epochs = 2 if debug else 10
+    total_epochs = 2 if debug else 30
     trainer = Trainer(
         model,
         train_loader,
@@ -444,14 +503,14 @@ def main():
         scheduler,
         device,
         total_epochs,
+        rank=rank,
     )
     trainer.train()
 
     # --- 3. (可选) 最终测试 ---
-    # test_loader = DataLoader(test_dataset, ...)
     trainer.test()  # 你可以为 Trainer 添加一个 .test() 方法
 
-    # Close TensorBoard writer
+    cleanup_ddp()
 
     print("Training complete!")
     print("To view TensorBoard, run: tensorboard --logdir=runs")
