@@ -187,9 +187,9 @@ threadpoolctl==3.6.0
 tinycss2==1.4.0
 tokenizers==0.21.4
 tomlkit==0.13.3
-torch==2.8.0
+torch==2.8
 torch-tb-profiler==0.4.3
-torchaudio==2.8.0
+torchaudio==2.8
 torchcodec==0.6.0
 torchsummary==1.5.1
 tornado==6.5.2

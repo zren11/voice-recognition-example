@@ -283,8 +283,6 @@ class Trainer:
                     )
         # --- DDP Synchronization Step ---
         if dist.is_initialized():
-            if self.is_main_process:
-                print("DDP is initialized")
             # If we are in DDP, we need to aggregate results from all processes
             metrics = torch.tensor([local_correct, local_total, local_val_loss]).to(
                 self.device
@@ -296,8 +294,6 @@ class Trainer:
             total_samples = metrics[1].item()
             total_loss = metrics[2].item()
         else:
-            if self.is_main_process:
-                print("DDP is not initialized")
             # If not in DDP, the local values are the total values
             total_correct = local_correct
             total_samples = local_total
@@ -338,14 +334,16 @@ class Trainer:
             self._validate_one_epoch(epoch, self.val_loader)
             if self.scheduler:
                 self.scheduler.step()
-            print("-" * 80)
+            if self.is_main_process:
+                print("-" * 80)
 
         if self.is_main_process:
             self.writer.close()
             print("Training complete!")
 
     def test(self):
-        print("Starting test...")
+        if self.is_main_process:
+            print("Starting test...")
         self.model.eval()  # 1. 切换到评估模式
         val_loss = 0
         correct = 0
@@ -367,24 +365,26 @@ class Trainer:
                 total += labels.size(0)
                 correct += (predicted_labels == labels).sum().item()
 
-                # 每10个batch打印一次验证进度
-                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
-                    self.test_loader
-                ):
-                    current_accuracy = 100 * correct / total
-                    print(
-                        f"    Test Batch {batch_idx+1:3d}/{len(self.test_loader)} | "
-                        f"Current Accuracy: {current_accuracy:.2f}%"
-                    )
+                if self.is_main_process:
+                    # 每10个batch打印一次验证进度
+                    if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
+                        self.test_loader
+                    ):
+                        current_accuracy = 100 * correct / total
+                        print(
+                            f"    Test Batch {batch_idx+1:3d}/{len(self.test_loader)} | "
+                            f"Current Accuracy: {current_accuracy:.2f}%"
+                        )
 
         avg_loss = val_loss / len(self.test_loader)
         val_accuracy = 100 * correct / total
 
-        print(
-            f"  Test completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
-        )
+        if self.is_main_process:
+            print(
+                f"  Test completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+            )
 
-        print("Test complete!")
+            print("Test complete!")
 
 
 def setup_ddp():
@@ -424,7 +424,7 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 
-def main():
+def train():
     # 这行代码会自动选择GPU（如果可用），否则退回到CPU
     device, local_rank, rank = setup_ddp()
 
@@ -433,9 +433,9 @@ def main():
     # Instantiate the Dataset and DataLoader
     print("start loading dataset")
     audio_info, label_map, label_map_reverse = load_data(
-        "SpeechCommands/speech_commands_v0.02"
+        "/data/SpeechCommands/speech_commands_v0.02"
     )
-    debug = False
+    debug = True
     # comment out this line if you want to train on a smaller dataset for a faster debugging purpose
     if debug:
         audio_info = audio_info[:10000]
@@ -456,7 +456,7 @@ def main():
     train_sampler = DistributedSampler(train_dataset)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=128,
+        batch_size=16,
         shuffle=False,
         sampler=train_sampler,
         collate_fn=collate_fn_spectrogram,
@@ -464,7 +464,7 @@ def main():
     val_sampler = DistributedSampler(val_dataset)
     val_loader = DataLoader(
         val_dataset,
-        batch_size=128,
+        batch_size=16,
         shuffle=False,
         sampler=val_sampler,
         collate_fn=collate_fn_spectrogram,
@@ -472,7 +472,7 @@ def main():
     test_sampler = DistributedSampler(test_dataset)
     test_loader = DataLoader(
         test_dataset,
-        batch_size=128,
+        batch_size=16,
         shuffle=False,
         sampler=test_sampler,
         collate_fn=collate_fn_spectrogram,
@@ -512,9 +512,10 @@ def main():
 
     cleanup_ddp()
 
-    print("Training complete!")
-    print("To view TensorBoard, run: tensorboard --logdir=runs")
+    if rank == 0:
+        print("Training complete!")
+        print("To view TensorBoard, run: tensorboard --logdir=runs")
 
 
 if __name__ == "__main__":
-    main()
+    train()
