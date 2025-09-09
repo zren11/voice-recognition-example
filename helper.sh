@@ -10,9 +10,9 @@ jupyter notebook --no-browser --NotebookApp.token='rETIRnArIDEs'
 
 
 # build docker image
-docker build -t voice-recognition-image:0.4 -f Dockerfile .
+docker build -t speech-recognition-image:0.4 -f Dockerfile .
 
 # load docker image to kind cluster
-kind load docker-image voice-recognition-image:0.4 --name ml
+kind load docker-image speech-recognition-image:0.4 --name ml
 
 

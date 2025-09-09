@@ -194,7 +194,7 @@ def run():
 
         def _train_one_epoch(self, epoch):
             self.train_loader.sampler.set_epoch(epoch)
-            self.model.train()  # 确保模型在训练模式
+            self.model.train()  # Ensure model is in training mode
             epoch_loss = 0.0
             num_batches = 0
 
@@ -248,7 +248,7 @@ def run():
             ):
                 loader.sampler.set_epoch(epoch)
 
-            self.model.eval()  # 1. 切换到评估模式
+            self.model.eval()  # 1. Switch to evaluation mode
             # These are calculated locally on each process
             local_val_loss = 0
             local_correct = 0
@@ -257,23 +257,23 @@ def run():
             if self.is_main_process:
                 print("  Starting validation...")
 
-            with torch.no_grad():  # 2. 在此代码块内不计算梯度
+            with torch.no_grad():  # 2. Do not compute gradients within this code block
                 for batch_idx, (spectrograms, labels) in enumerate(loader):
                     spectrograms = spectrograms.to(self.device)
                     labels = labels.to(self.device)
 
-                    # 只进行预测和计算损失
+                    # Only perform prediction and calculate loss
                     predictions = self.model(spectrograms)
                     loss = self.loss_fn(predictions, labels)
 
                     local_val_loss += loss.item()
 
-                    # 计算准确率
+                    # Calculate accuracy
                     _, predicted_labels = torch.max(predictions.data, 1)
                     local_total += labels.size(0)
                     local_correct += (predicted_labels == labels).sum().item()
 
-                    # 每10个batch打印一次验证进度
+                    # Print validation progress every 10 batches
                     if self.is_main_process and (
                         (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader)
                     ):
@@ -345,29 +345,29 @@ def run():
         def test(self):
             if self.is_main_process:
                 print("Starting test...")
-            self.model.eval()  # 1. 切换到评估模式
+            self.model.eval()  # 1. Switch to evaluation mode
             val_loss = 0
             correct = 0
             total = 0
 
-            with torch.no_grad():  # 2. 在此代码块内不计算梯度
+            with torch.no_grad():  # 2. Do not compute gradients within this code block
                 for batch_idx, (spectrograms, labels) in enumerate(self.test_loader):
                     spectrograms = spectrograms.to(self.device)
                     labels = labels.to(self.device)
 
-                    # 只进行预测和计算损失
+                    # Only perform prediction and calculate loss
                     predictions = self.model(spectrograms)
                     loss = self.loss_fn(predictions, labels)
 
                     val_loss += loss.item()
 
-                    # 计算准确率
+                    # Calculate accuracy
                     _, predicted_labels = torch.max(predictions.data, 1)
                     total += labels.size(0)
                     correct += (predicted_labels == labels).sum().item()
 
                     if self.is_main_process:
-                        # 每10个batch打印一次验证进度
+                        # Print validation progress every 10 batches
                         if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
                             self.test_loader
                         ):
@@ -388,8 +388,8 @@ def run():
                 print("Test complete!")
 
     def setup_ddp():
-        """初始化DDP进程组"""
-        # 这行是关键：为当前进程绑定唯一的GPU
+        """Initialize DDP process group"""
+        # This line is key: bind unique GPU for current process
         if (
             "LOCAL_RANK" not in os.environ
             or "RANK" not in os.environ
@@ -419,11 +419,11 @@ def run():
         return device, local_rank, rank
 
     def cleanup_ddp():
-        """销毁进程组"""
+        """Destroy process group"""
         dist.destroy_process_group()
 
     def train():
-        # 这行代码会自动选择GPU（如果可用），否则退回到CPU
+        # This line will automatically select GPU (if available), otherwise fall back to CPU
         device, local_rank, rank = setup_ddp()
 
         print(f"Using device: {device}")
@@ -493,7 +493,7 @@ def run():
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         print(f"Experiment timestamp: {timestamp}")
 
-        # --- 2. 创建并启动 Trainer ---
+        # --- 2. Create and start Trainer ---
         total_epochs = 2 if debug else 30
         trainer = Trainer(
             model,
@@ -509,8 +509,8 @@ def run():
         )
         trainer.train()
 
-        # --- 3. (可选) 最终测试 ---
-        trainer.test()  # 你可以为 Trainer 添加一个 .test() 方法
+        # --- 3. (Optional) Final test ---
+        trainer.test()  # You can add a .test() method to Trainer
 
         cleanup_ddp()
 
@@ -519,3 +519,7 @@ def run():
             print("To view TensorBoard, run: tensorboard --logdir=runs")
 
     train()
+
+
+if __name__ == "__main__":
+    run()

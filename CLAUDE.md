@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a PyTorch-based voice recognition system that trains a Transformer model on the Speech Commands dataset v0.02. The project implements audio classification for single-word spoken commands using mel spectrograms as input features.
+This is a PyTorch-based speech recognition system that trains a Transformer model on the Speech Commands dataset v0.02. The project implements audio classification for single-word spoken commands using mel spectrograms as input features.
 
 ## Development Commands
 
