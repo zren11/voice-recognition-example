@@ -23,7 +23,7 @@ spec:
                   containers:
                     - name: node
                       imagePullPolicy: IfNotPresent
-                      image: speech-recognition-image:0.4
+                      image: speech-recognition-image:0.1
                       volumeMounts:
                         - name: training-data
                           mountPath: /data
