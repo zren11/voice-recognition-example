@@ -13,7 +13,3 @@ nodes:
     extraMounts:
       - hostPath: /data
         containerPath: /data
-  - role: worker
-    extraMounts:
-      - hostPath: /data
-        containerPath: /data
