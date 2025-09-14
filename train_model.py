@@ -1,4 +1,4 @@
-def run():
+def train_model():
     # 1. IMPORTS
     # ---
     import torch
@@ -12,6 +12,9 @@ def run():
     from datetime import datetime
     import torch.distributed as dist
     from torch.utils.data.distributed import DistributedSampler
+    from torch.nn.parallel import DistributedDataParallel as DDP
+
+    debug = False
 
     # Its job: Load an audio file, convert it to a spectrogram, and return it with its numerical label.
     def load_data(data_path):
@@ -19,7 +22,8 @@ def run():
         label_map = {}
         label_map_reverse = {}
         # Walk through the data directory to find all audio files
-        full_data_path = os.path.join(os.path.dirname(__file__), data_path)
+        # full_data_path = os.path.join(os.path.dirname(__file__), data_path)
+        full_data_path = data_path
 
         # Get all subdirectories (word labels), excluding special directories
         labels = []
@@ -50,11 +54,13 @@ def run():
         return audio_info, label_map, label_map_reverse
 
     def split_data(audio_info):
+        # Don't shuffle here - let DistributedSampler handle shuffling
+        # This ensures proper distributed sampling
         random.seed(41)
         random.shuffle(audio_info)
         print(f"audio info length: {len(audio_info)}")
-        train_size = int(len(audio_info) * 0.7)
-        val_size = int(len(audio_info) * 0.2)
+        train_size = int(len(audio_info) * 0.95)
+        val_size = int(len(audio_info) * 0.03)
         test_size = len(audio_info) - train_size - val_size
         print(f"train size: {train_size}, val size: {val_size}, test size: {test_size}")
 
@@ -64,7 +70,10 @@ def run():
         return audio_info_training, audio_info_validation, audio_info_test
 
     class SpeechCommandsDataset(Dataset):
-        def __init__(self, audio_info, label_map, label_map_reverse):
+        def __init__(
+            self, audio_info, label_map, label_map_reverse, data_path_prefix=None
+        ):
+            self.data_path_prefix = data_path_prefix
             self.audio_info = audio_info
             self.label_map = label_map
             self.label_map_reverse = label_map_reverse
@@ -80,7 +89,12 @@ def run():
             audio_info = self.audio_info[index]
 
             # Build full path to audio file
-            audio_path = os.path.join(os.path.dirname(__file__), audio_info["filename"])
+            if self.data_path_prefix is None:
+                audio_path = os.path.join(
+                    os.path.dirname(__file__), audio_info["filename"]
+                )
+            else:
+                audio_path = os.path.join(self.data_path_prefix, audio_info["filename"])
 
             # Load the audio file
             waveform, sample_rate = torchaudio.load(audio_path)
@@ -179,7 +193,7 @@ def run():
             self.timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             self.total_steps = len(self.train_loader) * self.total_epochs
             if exp_path is None:
-                self.exp_path = f"runs/exp-{self.timestamp}"
+                self.exp_path = f"/data/speech-recognition/runs/exp-{self.timestamp}"
             else:
                 self.exp_path = exp_path
             print(f"Experiment path: {self.exp_path}")
@@ -211,6 +225,8 @@ def run():
                 # 3. ADJUST: Update the model's weights
                 self.optimizer.zero_grad()
                 loss.backward()
+                # Add gradient clipping to prevent explosion
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
                 # Update tracking variables
@@ -243,19 +259,13 @@ def run():
                 print("-" * 80)
 
         def _validate_one_epoch(self, epoch, loader=None):
-            if hasattr(loader, "sampler") and isinstance(
-                loader.sampler, torch.utils.data.distributed.DistributedSampler
-            ):
-                loader.sampler.set_epoch(epoch)
-
+            # Single-machine validation (only runs on rank 0)
             self.model.eval()  # 1. Switch to evaluation mode
-            # These are calculated locally on each process
-            local_val_loss = 0
-            local_correct = 0
-            local_total = 0
+            val_loss = 0
+            correct = 0
+            total = 0
 
-            if self.is_main_process:
-                print("  Starting validation...")
+            print("  Starting validation...")
 
             with torch.no_grad():  # 2. Do not compute gradients within this code block
                 for batch_idx, (spectrograms, labels) in enumerate(loader):
@@ -266,73 +276,59 @@ def run():
                     predictions = self.model(spectrograms)
                     loss = self.loss_fn(predictions, labels)
 
-                    local_val_loss += loss.item()
+                    val_loss += loss.item()
 
                     # Calculate accuracy
                     _, predicted_labels = torch.max(predictions.data, 1)
-                    local_total += labels.size(0)
-                    local_correct += (predicted_labels == labels).sum().item()
+                    total += labels.size(0)
+                    correct += (predicted_labels == labels).sum().item()
 
                     # Print validation progress every 10 batches
-                    if self.is_main_process and (
-                        (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader)
-                    ):
-                        current_accuracy = 100 * local_correct / local_total
+                    if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
+                        current_accuracy = 100 * correct / total
                         print(
                             f"    Validation Batch {batch_idx+1:3d}/{len(loader)} | "
                             f"Current Accuracy: {current_accuracy:.2f}%"
                         )
-            # --- DDP Synchronization Step ---
-            if dist.is_initialized():
-                # If we are in DDP, we need to aggregate results from all processes
-                metrics = torch.tensor([local_correct, local_total, local_val_loss]).to(
-                    self.device
-                )
-                # Sum the values from all GPUs
-                dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-                # Get the total values
-                total_correct = metrics[0].item()
-                total_samples = metrics[1].item()
-                total_loss = metrics[2].item()
-            else:
-                # If not in DDP, the local values are the total values
-                total_correct = local_correct
-                total_samples = local_total
-                total_loss = local_val_loss
 
-            if self.is_main_process:
-                if dist.is_initialized():
-                    # In DDP, the total number of batches is len(loader) * world_size
-                    world_size = dist.get_world_size()
-                    avg_loss = total_loss / (len(loader) * world_size)
-                else:
-                    avg_loss = total_loss / len(loader)
+            # Simple single-machine calculation
+            avg_loss = val_loss / len(loader)
+            val_accuracy = 100 * correct / total
 
-                val_accuracy = 100 * total_correct / total_samples
+            print(
+                f"  Validation completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+            )
 
+            if val_accuracy > self.best_val_accuracy:
+                self.best_val_accuracy = val_accuracy
                 print(
-                    f"  Validation completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+                    f"New best validation accuracy: {self.best_val_accuracy:.2f}%. Saving model..."
                 )
+                model_folder = f"{self.exp_path}/models"
+                os.makedirs(model_folder, exist_ok=True)
+                # Handle both DDP and non-DDP models
+                if hasattr(self.model, "module"):
+                    model_state = self.model.module.state_dict()
+                else:
+                    model_state = self.model.state_dict()
+                torch.save(model_state, f"{model_folder}/best-epoch{epoch}.pth")
 
-                if val_accuracy > self.best_val_accuracy:
-                    self.best_val_accuracy = val_accuracy
-                    print(
-                        f"New best validation accuracy: {self.best_val_accuracy:.2f}%. Saving model..."
-                    )
-                    model_folder = f"{self.exp_path}/models"
-                    os.makedirs(model_folder, exist_ok=True)
-                    torch.save(
-                        self.model.state_dict(), f"{model_folder}/best-epoch{epoch}.pth"
-                    )
-
-                    self.writer.add_scalar("Loss/Val", total_loss, epoch + 1)
+                if self.writer:
+                    self.writer.add_scalar("Loss/Val", val_loss, epoch + 1)
                     self.writer.add_scalar("Accuracy/Val", val_accuracy, epoch + 1)
 
         def train(self):
             print("Starting training...")
             for epoch in range(self.total_epochs):
                 self._train_one_epoch(epoch)
-                self._validate_one_epoch(epoch, self.val_loader)
+                # Only validate if val_loader is available (single-machine validation)
+                if self.val_loader is not None:
+                    self._validate_one_epoch(epoch, self.val_loader)
+
+                # Synchronize all processes after validation
+                if dist.is_initialized():
+                    dist.barrier()  # Wait for rank 0 to finish validation
+
                 if self.scheduler:
                     self.scheduler.step()
                 if self.is_main_process:
@@ -343,8 +339,11 @@ def run():
                 print("Training complete!")
 
         def test(self):
-            if self.is_main_process:
-                print("Starting test...")
+            # Only run test on rank 0 (single-machine testing)
+            if self.test_loader is None:
+                return
+
+            print("Starting test...")
             self.model.eval()  # 1. Switch to evaluation mode
             val_loss = 0
             correct = 0
@@ -366,26 +365,22 @@ def run():
                     total += labels.size(0)
                     correct += (predicted_labels == labels).sum().item()
 
-                    if self.is_main_process:
-                        # Print validation progress every 10 batches
-                        if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(
-                            self.test_loader
-                        ):
-                            current_accuracy = 100 * correct / total
-                            print(
-                                f"    Test Batch {batch_idx+1:3d}/{len(self.test_loader)} | "
-                                f"Current Accuracy: {current_accuracy:.2f}%"
-                            )
+                    # Print test progress every 10 batches
+                    if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(self.test_loader):
+                        current_accuracy = 100 * correct / total
+                        print(
+                            f"    Test Batch {batch_idx+1:3d}/{len(self.test_loader)} | "
+                            f"Current Accuracy: {current_accuracy:.2f}%"
+                        )
 
+            # Simple single-machine calculation
             avg_loss = val_loss / len(self.test_loader)
             val_accuracy = 100 * correct / total
 
-            if self.is_main_process:
-                print(
-                    f"  Test completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
-                )
-
-                print("Test complete!")
+            print(
+                f"  Test completed | Loss: {avg_loss:.6f} | Accuracy: {val_accuracy:.2f}%"
+            )
+            print("Test complete!")
 
     def setup_ddp():
         """Initialize DDP process group"""
@@ -406,6 +401,8 @@ def run():
         if torch.cuda.is_available():
             dist.init_process_group(backend="nccl")
             device = torch.device("cuda", local_rank)
+            torch.cuda.set_device(device)
+            print(f"Using device: {device}")
 
         else:
             device = torch.device("cpu")
@@ -430,63 +427,86 @@ def run():
 
         # Instantiate the Dataset and DataLoader
         print("start loading dataset")
-        audio_info, label_map, label_map_reverse = load_data(
-            "/data/SpeechCommands/speech_commands_v0.02"
-        )
-        debug = True
-        # comment out this line if you want to train on a smaller dataset for a faster debugging purpose
-        if debug:
-            audio_info = audio_info[:10000]
+        data_path_prefix = "/data/SpeechCommands/speech_commands_v0.02"
+        audio_info, label_map, label_map_reverse = load_data(data_path_prefix)
 
         audio_info_training, audio_info_validation, audio_info_test = split_data(
             audio_info
         )
+
+        if debug:
+            # Use more data for debug: 4000 train, 500 val, 500 test
+            audio_info_training = audio_info_training[:4000]
+            audio_info_validation = audio_info_validation[:500]
+            audio_info_test = audio_info_test[:500]
+            print(
+                f"Debug mode: using train={len(audio_info_training)}, val={len(audio_info_validation)}, test={len(audio_info_test)}"
+            )
+
         train_dataset = SpeechCommandsDataset(
-            audio_info_training, label_map, label_map_reverse
+            audio_info_training, label_map, label_map_reverse, data_path_prefix
         )
 
         val_dataset = SpeechCommandsDataset(
-            audio_info_validation, label_map, label_map_reverse
+            audio_info_validation, label_map, label_map_reverse, data_path_prefix
         )
         test_dataset = SpeechCommandsDataset(
-            audio_info_test, label_map, label_map_reverse
+            audio_info_test, label_map, label_map_reverse, data_path_prefix
         )
+
         print("dataset loaded")
 
         print("start init data loader")
 
-        train_sampler = DistributedSampler(train_dataset)
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        # Adjust batch size for debug mode
+        batch_size = 64 if debug else 256
         train_loader = DataLoader(
             train_dataset,
-            batch_size=16,
+            batch_size=batch_size,
             shuffle=False,
             sampler=train_sampler,
             collate_fn=collate_fn_spectrogram,
         )
-        val_sampler = DistributedSampler(val_dataset)
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=16,
-            shuffle=False,
-            sampler=val_sampler,
-            collate_fn=collate_fn_spectrogram,
-        )
-        test_sampler = DistributedSampler(test_dataset)
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=16,
-            shuffle=False,
-            sampler=test_sampler,
-            collate_fn=collate_fn_spectrogram,
-        )
+        # Use single-machine validation (only rank 0)
+        if rank == 0:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                collate_fn=collate_fn_spectrogram,
+            )
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                collate_fn=collate_fn_spectrogram,
+            )
+        else:
+            val_loader = None
+            test_loader = None
 
         print("data loader initialized")
 
         # Instantiate the Model, Loss Function, and Optimizer
         model = AudioTransformer().to(device)
 
+        # Create DDP model - different parameters for CPU vs GPU
+        if torch.cuda.is_available() and device.type == "cuda":
+            ddp_model = DDP(model, device_ids=[local_rank])
+        else:
+            # For CPU training, don't specify device_ids
+            ddp_model = DDP(model)
+
         loss_fn = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        # Use linear scaling with a more conservative approach
+        base_lr = 0.001
+        lr = (
+            base_lr * min(world_size, 2) if not debug else base_lr
+        )  # No scaling in debug
+        print(f"Using learning rate: {lr} (world_size: {world_size}, debug: {debug})")
+        optimizer = torch.optim.Adam(ddp_model.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.9)
 
         # Generate timestamp for this experiment
@@ -494,9 +514,9 @@ def run():
         print(f"Experiment timestamp: {timestamp}")
 
         # --- 2. Create and start Trainer ---
-        total_epochs = 2 if debug else 30
+        total_epochs = 10 if debug else 30
         trainer = Trainer(
-            model,
+            ddp_model,
             train_loader,
             val_loader,
             test_loader,
@@ -512,6 +532,10 @@ def run():
         # --- 3. (Optional) Final test ---
         trainer.test()  # You can add a .test() method to Trainer
 
+        # Synchronize all processes after test
+        if dist.is_initialized():
+            dist.barrier()  # Wait for rank 0 to finish test
+
         cleanup_ddp()
 
         if rank == 0:
@@ -522,4 +546,4 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    train_model()
