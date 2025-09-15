@@ -195,12 +195,44 @@ kubectl logs <pod-name> -f
 3. **Test predictions** - Run `predict.py` to validate model performance
 4. **Scale up** - Deploy to Kubernetes for distributed training
 
+## 🧪 Tested Environments
+
+### Software Requirements
+
+- **Python**: 3.12
+- **PyTorch**: 2.8
+- **Operating System**: Linux x86
+
+### Hardware Tested
+
+**Kubernetes Environment:**
+
+- **Kind**: v0.30.0 with Kubernetes Server v1.34.0
+- **Local development cluster for testing**
+
+**Production Environments:**
+
+- **AWS**: 2x g4dn.12xlarge instances (4x Tesla T4 GPUs each) wiht Driver Version 570.172.08 CUDA Version 12.8
+- **NVIDIA A6000**: Single card with Driver 535.230.02, CUDA 12.2
+
+### Performance Expectations
+
+- **Accuracy**: ~80% on validation set
+- **Loss**: <0.6 after training completion
+- **Training Time**: Varies by hardware (use `debug=True` for faster testing on CPU)
+
+### Testing & Validation
+
+- Play WAV files in `example.ipynb` for quick audio verification
+- Or use `predict.py` to test random audio samples
+
 ## 📝 Notes
 
 - **Data Volume**: The setup uses `/data` directory mounted across all containers
-- **GPU Support**: Works with both CPU and GPU training
+- **GPU Support**: Works with both CPU and GPU training (set `debug=True` for CPU-only testing)
 - **Reproducibility**: Fixed random seeds (41) for consistent results
 - **Production Ready**: Includes model checkpointing, logging, and monitoring
+- **Recommended**: Always use `torchrun` for running `train_model.py`
 
 ## 🤝 Contributing
 

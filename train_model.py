@@ -48,7 +48,7 @@ def train_model_func():
             label_dir = os.path.join(full_data_path, label)
             for filename in os.listdir(label_dir):
                 if filename.endswith(".wav"):
-                    # Store relative path from voice-recognition folder
+                    # Store relative path from speech-recognition folder
                     relative_path = os.path.join(data_path, label, filename)
                     audio_info.append({"filename": relative_path, "label": label})
         return audio_info, label_map, label_map_reverse
