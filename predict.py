@@ -3,10 +3,9 @@ import torchaudio
 import json
 import os
 import torch.nn as nn
+import random
+import glob
 
-
-# --- 1. Copy model definition from your training script ---
-# This script needs to know what your model looks like, so we copy the AudioTransformer class code
 class AudioTransformer(nn.Module):
     def __init__(self, num_input_features=128, num_classes=35, dropout=0.1):
         super().__init__()
@@ -14,7 +13,9 @@ class AudioTransformer(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=num_input_features, nhead=4, batch_first=True, dropout=dropout
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=4
+        )
         self.output_layer = nn.Linear(num_input_features, num_classes)
 
     def forward(self, spectrogram_batch):
@@ -27,8 +28,6 @@ class AudioTransformer(nn.Module):
         predictions = self.output_layer(x)
         return predictions
 
-
-# --- 2. Define inference function ---
 def predict(model, audio_path, label_map_reverse, device):
     """
     Load a WAV file, perform prediction and return results
@@ -73,18 +72,38 @@ def predict(model, audio_path, label_map_reverse, device):
     return predicted_label, probabilities[predicted_index].item()
 
 
-# --- 3. Main program ---
+def get_random_audio_files(data_path, num_files=10):
+    """
+    Get random audio files from the dataset
+    """
+    all_audio_files = []
+
+    # Collect all wav files from all subdirectories
+    for label_dir in os.listdir(data_path):
+        label_path = os.path.join(data_path, label_dir)
+        if (
+            os.path.isdir(label_path)
+            and not label_dir.startswith("_")
+            and label_dir != "LICENSE"
+        ):
+            wav_files = glob.glob(os.path.join(label_path, "*.wav"))
+            for wav_file in wav_files:
+                # Store both file path and true label
+                all_audio_files.append((wav_file, label_dir))
+
+    # Randomly sample files
+    random.shuffle(all_audio_files)
+    return all_audio_files[:num_files]
+
+
 if __name__ == "__main__":
     # --- Configuration ---
-    MODEL_PATH = "<your model path>"  # Path to your saved best model
-    # !! Modify this to the WAV file path you want to test !!
-    WAV_FILE_PATH = "<the wav file in SpeechCommands folder you want to test>"
+    MODEL_PATH = "/data/speech-recognition/runs/exp-20250913-205502/models/best-epoch15.pth"  # Path to your saved best model
+    DATA_PATH = "/data/SpeechCommands/speech_commands_v0.02"  # Dataset path
+    NUM_SAMPLES = 100  # Number of random audio files to test
 
-    # !! The label_map_reverse here must be exactly the same as in your training script !!
-    # You can copy from the output of your training script, or load a saved label_map file
-    full_data_path = os.path.join(
-        os.path.dirname(__file__), "/data/SpeechCommands/speech_commands_v0.02"
-    )
+    # Build label mapping
+    full_data_path = DATA_PATH
     labels = []
     for item in os.listdir(full_data_path):
         item_path = os.path.join(full_data_path, item)
@@ -93,31 +112,43 @@ if __name__ == "__main__":
 
     # Sort labels for consistent mapping
     labels.sort()
-    # For convenience, I'll manually create a simplified one here
-    all_labels = labels
-    all_labels.sort()  # Ensure order is the same as during training
-    print(all_labels)
-    label_map_reverse = {idx: label for idx, label in enumerate(all_labels)}
+    label_map_reverse = {idx: label for idx, label in enumerate(labels)}
 
     # --- Load model ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # First, create a model instance with exactly the same structure as when saved
+    # Create model instance and load weights
     model = AudioTransformer(num_classes=len(label_map_reverse)).to(device)
-
-    # Then, load the saved weights
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
 
     print(f"Model loaded from {MODEL_PATH}")
+    print(f"Device: {device}")
+    print(f"Testing {NUM_SAMPLES} random audio files...")
+    print("=" * 80)
 
-    # --- Run prediction ---
-    predicted_word, confidence = predict(
-        model, WAV_FILE_PATH, label_map_reverse, device
+    # --- Get random audio files and run predictions ---
+    random_files = get_random_audio_files(DATA_PATH, NUM_SAMPLES)
+
+    correct_predictions = 0
+    for i, (audio_path, true_label) in enumerate(random_files, 1):
+        predicted_word, confidence = predict(
+            model, audio_path, label_map_reverse, device
+        )
+
+        # Check if prediction is correct
+        is_correct = predicted_word == true_label
+        if is_correct:
+            correct_predictions += 1
+
+        status = "✓" if is_correct else "✗"
+
+        print(f"[{i:2d}/{NUM_SAMPLES}] {status} File: {audio_path}")
+        print(
+            f"       True: '{true_label}' | Predicted: '{predicted_word}' | Confidence: {confidence:.2%}"
+        )
+        print()
+
+    print("=" * 80)
+    print(
+        f"Accuracy: {correct_predictions}/{NUM_SAMPLES} ({correct_predictions/NUM_SAMPLES:.1%})"
     )
-
-    # --- Display results ---
-    print("-" * 30)
-    print(f"Audio File: {WAV_FILE_PATH}")
-    print(f"Predicted Word: '{predicted_word}'")
-    print(f"Confidence: {confidence:.2%}")
-    print("-" * 30)
