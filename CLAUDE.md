@@ -8,38 +8,40 @@ This is a PyTorch-based speech recognition system that trains a Transformer mode
 
 ## Development Commands
 
-**Training (Local):**
-```bash
-python train_model.py
-```
-
 **Training (Distributed):**
+
 ```bash
+torchrun --nproc_per_node=1 train_model.py  # One-GPU local
+# or
 torchrun --nproc_per_node=2 train_model.py  # Multi-GPU local
-# See example.ipynb for Kubeflow distributed training setup
 ```
 
 **Prediction/Inference:**
+
 ```bash
 python predict.py
 ```
 
 **Data Preparation:**
+
 ```bash
 python prepare-data.py
 ```
 
 **Install Dependencies:**
+
 ```bash
 pip install -r requirements.txt
 ```
 
 **TensorBoard Visualization:**
+
 ```bash
 tensorboard --logdir=runs
 ```
 
 **Container Development:**
+
 ```bash
 docker build -t speech-recognition .
 kind create cluster --config kind-config.yaml  # Local K8s testing
@@ -50,6 +52,7 @@ kind create cluster --config kind-config.yaml  # Local K8s testing
 ### Core Components
 
 **train_model.py** - Main training script containing:
+
 - `SpeechCommandsDataset`: Custom PyTorch Dataset for loading and preprocessing audio files
 - `AudioTransformer`: Transformer-based neural network model (4 layers, 4 attention heads, 128 d_model)
 - `Trainer`: Training orchestration class with distributed training support, validation, model saving, and TensorBoard logging
@@ -70,7 +73,7 @@ kind create cluster --config kind-config.yaml  # Local K8s testing
 
 ### Model Architecture
 
-- **Input**: Mel spectrograms (batch_size, 128, 81) 
+- **Input**: Mel spectrograms (batch_size, 128, 81)
 - **Transformer Encoder**: 4 layers, 4 attention heads, 128 features
 - **Output**: 35 classes (word classifications)
 - **Aggregation**: Mean pooling over time dimension before final linear layer
