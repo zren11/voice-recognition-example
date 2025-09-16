@@ -1,4 +1,4 @@
-def train_model_func():
+def train_model():
     # 1. IMPORTS
     # ---
     import torch
